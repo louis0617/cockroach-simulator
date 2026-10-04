@@ -1,0 +1,16 @@
+[gd_scene format=3 uid="uid://h1xr3rr61hr6"]
+
+[ext_resource type="Script" uid="uid://dt8aa8wdx55p6" path="res://scripts/candy.gd" id="1"]
+
+[node name="Candy" type="RigidBody2D" unique_id=1338892669]
+z_index = 4
+can_sleep = false
+script = ExtResource("1")
+
+[node name="Sprite2D" type="Sprite2D" parent="." unique_id=1441265960]
+
+[node name="Goo" type="Sprite2D" parent="."]
+z_index = 1
+modulate = Color(0.32, 0.14, 0.07, 0)
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="." unique_id=996114435]

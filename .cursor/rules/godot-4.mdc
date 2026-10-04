@@ -1,0 +1,8 @@
+---
+description: Godot 4.x API 约束，避免生成 Godot 3 语法
+alwaysApply: true
+---
+
+# Godot 4 API
+
+This is a Godot 4.x project (Engine 4.7). Use `await`, `@export`, `@onready`, `CharacterBody2D`/`CharacterBody3D`, the `velocity` property with `move_and_slide()` (no argument), and Callable-based signal connect syntax. Never use Godot 3 APIs (`KinematicBody2D`, `yield`, `move_and_slide(velocity)`, old `connect("signal", self, "method")`).

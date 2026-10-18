@@ -1,6 +1,7 @@
 extends Control
 
 var order_id: String = ""
+var caption: String = ""
 var _items: Array = []
 
 
@@ -26,6 +27,15 @@ func setup(id: String, items: Array) -> void:
 	add_child(lab)
 
 
+func set_caption(text: String) -> void:
+	caption = text
+	if get_child_count() < 2:
+		return
+	var lab := get_child(1) as Label
+	if lab != null:
+		lab.text = text
+
+
 func _gui_input(event: InputEvent) -> void:
 	if event is InputEventMouseButton:
 		var mb := event as InputEventMouseButton
@@ -45,7 +55,7 @@ func _get_drag_data(_at: Vector2) -> Variant:
 	cup.show_layers(_items, true)
 	preview.add_child(cup)
 	var lab := Label.new()
-	lab.text = order_id
+	lab.text = caption if caption != "" else order_id
 	lab.position = Vector2(0, 90)
 	lab.size = Vector2(80, 20)
 	lab.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER

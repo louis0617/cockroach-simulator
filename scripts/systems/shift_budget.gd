@@ -30,31 +30,34 @@ var cup_spoil: float = 2.5
 var rng := RandomNumberGenerator.new()
 
 
-static func roll(day: int, last_rating: float, tight_streak: int) -> ShiftBudget:
+static func roll(day_index: int, last_rating: float, tight_streak: int) -> ShiftBudget:
 	var shift := ShiftBudget.new()
-	shift.day = day
-	shift.rng.seed = day
-	shift.duration = clampf(100.0 + 8.0 * float(day), 100.0, 240.0)
-	shift.interval = maxf(4.2, 10.5 - 0.35 * float(day))
-	shift.concurrent = clampi(2 + int(float(day) / 3.0), 2, 5)
-	shift.ingredients = 1 if day < 2 else clampi(1 + int(float(day - 1) / 4.0), 1, 4)
-	shift.price_bonus = int(float(day) / 5.0) * 2
-	shift.patience = maxf(18.0, round(46.0 - 1.1 * float(day)))
-	shift.thief_chance = minf(0.7, 0.25 + 0.04 * float(day))
-	shift.thief_time = maxf(6.0, 12.0 - 0.4 * float(day))
-	shift.roach_count = clampi(1 + int(float(day) / 4.0), 1, 4)
-	shift.roach_interval = maxf(4.0, 9.0 - 0.25 * float(day))
-	shift.soil_seconds = 0.0 if day < 3 else maxf(1.1, 1.8 - 0.05 * float(day))
-	shift.stock = -1 if day < 6 else maxi(4, 14 - day)
-	shift.rinse = day >= 8
-	shift.rent = int(round(30.0 + 14.0 * pow(float(day), 0.85)))
-	shift.restock_cost = 8 + day
+	shift.day = day_index
+	shift.rng.seed = day_index
+	shift.duration = clampf(100.0 + 8.0 * float(day_index), 100.0, 240.0)
+	shift.interval = maxf(4.2, 10.5 - 0.35 * float(day_index))
+	shift.concurrent = clampi(2 + int(float(day_index) / 3.0), 2, 5)
+	shift.ingredients = 1 if day_index < 2 else clampi(1 + int(float(day_index - 1) / 4.0), 1, 4)
+	shift.price_bonus = int(float(day_index) / 5.0) * 2
+	shift.patience = maxf(18.0, round(46.0 - 1.1 * float(day_index)))
+	shift.thief_chance = minf(0.7, 0.25 + 0.04 * float(day_index))
+	shift.thief_time = maxf(6.0, 12.0 - 0.4 * float(day_index))
+	shift.roach_count = clampi(1 + int(float(day_index) / 4.0), 1, 4)
+	shift.roach_interval = maxf(4.0, 9.0 - 0.25 * float(day_index))
+	shift.soil_seconds = maxf(1.2, 2.8 - 0.06 * float(day_index))
+	if day_index < 3:
+		shift.soil_seconds *= 1.5
+	shift.stock = -1 if day_index < 6 else maxi(4, 14 - day_index)
+	shift.rinse = day_index >= 8
+	shift.cup_spoil = 4.0 if day_index < 3 else 2.5
+	shift.rent = int(round(30.0 + 14.0 * pow(float(day_index), 0.85)))
+	shift.restock_cost = 8 + day_index
 	var force_easy := last_rating < 3.0
-	var force_regular := tight_streak >= 2 and day >= 4
+	var force_regular := tight_streak >= 2 and day_index >= 4
 	if force_regular:
 		shift.modifier = "regular"
 	elif force_easy:
-		if day >= 4 and shift.rng.randi_range(0, 1) == 0:
+		if day_index >= 4 and shift.rng.randi_range(0, 1) == 0:
 			shift.modifier = "regular"
 		else:
 			shift.modifier = "normal"
@@ -92,11 +95,11 @@ func _pick_modifier() -> String:
 	var total := 0
 	for weight in weights:
 		total += weight
-	var roll := rng.randi_range(1, total)
+	var picked := rng.randi_range(1, total)
 	var cursor := 0
 	for i in ids.size():
 		cursor += weights[i]
-		if roll <= cursor:
+		if picked <= cursor:
 			return ids[i]
 	return "normal"
 

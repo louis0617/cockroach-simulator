@@ -28,7 +28,7 @@ func setup(order: Order) -> void:
 	if order.time_limit > 0.0:
 		patience = clampf(order.time_left / order.time_limit, 0.0, 1.0)
 	disguise = 0
-	_show_recipe("、".join(ingredients))
+	_show_recipe(order.describe())
 	mouse_filter = Control.MOUSE_FILTER_STOP
 	if not resized.is_connected(queue_redraw):
 		resized.connect(queue_redraw)
@@ -56,7 +56,11 @@ func setup_thief(fake_id: String, patience_ratio: float, disguise_level: int, lo
 
 
 func _can_drop_data(_at: Vector2, data: Variant) -> bool:
-	return typeof(data) == TYPE_STRING and (is_thief or order_status == "ready")
+	if typeof(data) != TYPE_STRING or not str(data).begins_with("cup:"):
+		return false
+	if is_thief:
+		return true
+	return order_status == "pending" or order_status == "making" or order_status == "ready" or order_status == "handover_pending"
 
 
 func _drop_data(_at: Vector2, data: Variant) -> void:

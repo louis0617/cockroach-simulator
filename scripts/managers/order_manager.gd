@@ -59,11 +59,12 @@ func create_order(day: int) -> Order:
 	order.order_id = _gen_order_id(order.platform)
 	order.display_name = NameGenerator.generate(day, _rng)
 	order.ingredients = _gen_ingredients(day)
-	order.shake_required = _randf() < 0.45
+	order.shakes = _roll_shakes(day)
+	order.shake_required = order.shakes > 0
 	order.time_limit = patience
 	order.time_left = order.time_limit
 	order.status = "pending"
-	var base_price := 12 + 4 * order.ingredients.size() + price_bonus
+	var base_price := 12 + 4 * order.ingredients.size() + 2 * order.shakes + price_bonus
 	order.price = int(round(float(base_price) * price_mul))
 	active_orders.append(order)
 	order_created.emit(order)
@@ -159,6 +160,14 @@ func _open_count() -> int:
 		if order.status == "pending" or order.status == "making" or order.status == "ready" or order.status == "handover_pending":
 			n += 1
 	return n
+
+
+func _roll_shakes(day: int) -> int:
+	if day <= 1:
+		return 0 if _randf() < 0.5 else 1
+	if day == 2:
+		return _rand_index(3)
+	return 1 + _rand_index(3)
 
 
 func _randf() -> float:

@@ -1,94 +1,94 @@
 extends Node
 
 signal cup_updated
-signal cup_finished(order_id: String)
 signal recipe_error(reason: String)
 
-var current_order_id: String = ""
-var needed: Array[String] = []
+var station_open: bool = false
 var added: Array[String] = []
-var shake_required: bool = false
+var water: float = 0.0
+var water_done: bool = false
 var shake_count: int = 0
+var tainted: bool = false
 
 
 func reset_for_new_day() -> void:
-	_clear()
+	station_open = false
+	_clear_contents()
+
+
+func open_station() -> void:
+	station_open = true
+	_clear_contents()
 
 
 func has_cup() -> bool:
-	return current_order_id != ""
-
-
-func start_cup(order: Order) -> bool:
-	if has_cup():
-		recipe_error.emit("先做完手里这杯")
-		return false
-	current_order_id = order.order_id
-	needed = order.ingredients.duplicate()
-	added.clear()
-	shake_required = order.shake_required
-	shake_count = 0
-	cup_updated.emit()
-	return true
+	return station_open
 
 
 func add_ingredient(ingredient_id: String) -> void:
-	if current_order_id == "":
-		recipe_error.emit("先点一张订单")
+	if not station_open:
+		recipe_error.emit("台上没有杯子")
 		return
-	if added.size() >= needed.size():
-		recipe_error.emit("料已经加完了")
-		return
-	var expect: String = needed[added.size()]
-	if ingredient_id != expect:
-		recipe_error.emit("下一料是%s" % expect)
+	if added.has(ingredient_id):
+		recipe_error.emit("%s已经加过了" % ingredient_id)
 		return
 	added.append(ingredient_id)
 	cup_updated.emit()
 
 
+func add_water(amount: float) -> void:
+	if not station_open or water_done:
+		return
+	water = minf(1.0, water + amount)
+	if water >= 1.0:
+		water_done = true
+	cup_updated.emit()
+
+
+func mark_tainted() -> void:
+	if not station_open or tainted:
+		return
+	tainted = true
+	cup_updated.emit()
+
+
 func shake() -> void:
-	if current_order_id == "" or not shake_required:
+	if not station_open:
+		recipe_error.emit("台上没有杯子")
 		return
-	if added.size() < needed.size():
-		recipe_error.emit("料还没加完")
-		return
-	if shake_count >= 3:
+	if shake_count >= 4:
+		recipe_error.emit("已经摇过头了")
 		return
 	shake_count += 1
 	cup_updated.emit()
 
 
-func seal_cup() -> bool:
-	if current_order_id == "":
-		recipe_error.emit("没有正在做的杯子")
-		return false
-	if added.size() < needed.size():
-		recipe_error.emit("配方还没加完")
-		return false
-	if shake_required and shake_count < 3:
-		recipe_error.emit("还要再摇 %d 下" % (3 - shake_count))
-		return false
-	var done := current_order_id
-	_clear()
-	cup_finished.emit(done)
-	return true
+func recipe_key() -> String:
+	var names: Array[String] = added.duplicate()
+	names.sort()
+	return "%s#s%d" % ["+".join(names), shake_count]
+
+
+func snapshot_and_reset() -> Dictionary:
+	var shot := {
+		"items": added.duplicate(),
+		"key": recipe_key(),
+		"shakes": shake_count,
+		"tainted": tainted,
+	}
+	_clear_contents()
+	cup_updated.emit()
+	return shot
 
 
 func discard_cup() -> void:
-	_clear()
+	_clear_contents()
 	cup_updated.emit()
 
 
-func next_ingredient() -> String:
-	if added.size() >= needed.size():
-		return ""
-	return needed[added.size()]
-
-
-func _clear() -> void:
-	current_order_id = ""
-	needed.clear()
+func _clear_contents() -> void:
 	added.clear()
-	shake_required = false
+	water = 0.0
+	water_done = false
 	shake_count = 0
+	tainted = false

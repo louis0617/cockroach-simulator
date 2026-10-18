@@ -51,6 +51,14 @@ var _restock_left: float = 0.0
 var _restock_id: String = ""
 var _rinse_left: float = 0.0
 var _cup_dirty: bool = false
+var _pouring: bool = false
+var _slipper_held: bool = false
+var _slipper_rest: Control
+var _trash: Control
+var _sink: Control
+var _rinse_station: Control
+var _ready_cups: Array[Dictionary] = []
+var _cup_serial: int = 0
 var _handover: Control
 var _handover_line: Label
 var _handover_list: VBoxContainer
@@ -67,8 +75,7 @@ func _ready() -> void:
 	_orders.order_created.connect(func(_o: Order) -> void: _rebuild_orders())
 	_orders.order_status_changed.connect(_on_order_status)
 	_orders.order_expired.connect(_on_order_expired)
-	_recipe.cup_updated.connect(_refresh_station)
-	_recipe.cup_finished.connect(_on_cup_finished)
+	_recipe.cup_updated.connect(_on_cup_updated)
 	_recipe.recipe_error.connect(_set_hint)
 	_economy.economy_changed.connect(_refresh_hud)
 	_refresh_hud()
@@ -81,9 +88,13 @@ func _process(delta: float) -> void:
 		return
 	_tick_roaches(delta)
 	_tick_chores(delta)
+	_tick_pour(delta)
+	if _slipper_held and _slipper != null:
+		_slipper.visible = true
+		_slipper.global_position = get_global_mouse_position()
 	_orders.tick(delta, _day.day_index)
 	_tick_thief(delta)
-	if _orders.ready_orders().is_empty():
+	if _ready_cups.is_empty():
 		_visitor_wait = 0.0
 		return
 	if _thief_alive or _thief_roll_done:
@@ -119,8 +130,6 @@ func _on_tick(time_left: float) -> void:
 
 func _on_order_status(order: Order, _old_status: String, new_status: String) -> void:
 	if new_status == "failed":
-		if _recipe.current_order_id == order.order_id:
-			_recipe.discard_cup()
 		_economy.add_fine(_fine(10))
 		_economy.add_review(false)
 		_set_hint("%s 超时了，差评" % order.order_id)
@@ -131,14 +140,6 @@ func _on_order_status(order: Order, _old_status: String, new_status: String) -> 
 
 func _on_order_expired(order: Order) -> void:
 	print("OrderManager 超时 %s" % order.order_id)
-
-
-func _on_cup_finished(order_id: String) -> void:
-	_orders.mark_ready(order_id)
-	_thief_roll_done = false
-	_set_hint("把这杯拖到单号对得上的客人身上")
-	_refresh_station()
-	_refresh_pickup()
 
 
 func _start_day() -> void:
@@ -155,8 +156,16 @@ func _start_day() -> void:
 	_wash_left = 0.0
 	_restock_left = 0.0
 	_rinse_left = 0.0
+	_pouring = false
+	_slipper_held = false
+	if _slipper != null:
+		_slipper.visible = false
+	_show_resting_slipper()
+	_refresh_tool_buttons()
+	_ready_cups.clear()
 	_init_supplies()
 	_day.start_day(_day.day_index, _shift.duration)
+	_recipe.open_station()
 	_orders.create_order(_day.day_index)
 	_clear_roaches()
 	_roach_spawn = 1.0
@@ -166,7 +175,7 @@ func _start_day() -> void:
 	_rebuild_orders()
 	_refresh_station()
 	_refresh_pickup()
-	_set_hint("第 %d 天 · %s。拖杯子给对得上的客人，假单号用拖鞋打" % [_day.day_index, _shift.modifier_name])
+	_set_hint("第 %d 天 · %s。按住杯子加水，小料随便点。做标准了拖给任何一位要这杯的客人" % [_day.day_index, _shift.modifier_name])
 
 
 func _next_day() -> void:
@@ -230,10 +239,14 @@ func _jump_to_typed_day() -> void:
 
 
 func _spawn_thief() -> void:
-	var waiting: Array[Order] = _orders.ready_orders()
-	if waiting.is_empty() or _thief_alive:
+	var waiting: Array = _orders.active_orders
+	var pending: Array[Order] = []
+	for order in waiting:
+		if order.status == "pending":
+			pending.append(order)
+	if pending.is_empty() or _thief_alive or _ready_cups.is_empty():
 		return
-	var target: Order = waiting[randi() % waiting.size()]
+	var target: Order = pending[randi() % pending.size()]
 	_thief_claim = _fake_id(target.order_id)
 	_thief_alive = true
 	_thief_max = 10.0 if _shift == null else _shift.thief_time
@@ -256,11 +269,13 @@ func _tick_thief(delta: float) -> void:
 			child.queue_redraw()
 	if _thief_left > 0.0:
 		return
-	var waiting: Array[Order] = _orders.ready_orders()
-	if not waiting.is_empty():
-		var stolen: Order = waiting[0]
-		var loss: int = stolen.value()
-		_orders.mark_stolen(stolen.order_id)
+	if not _ready_cups.is_empty():
+		var stolen: Dictionary = _ready_cups[0]
+		_ready_cups.remove_at(0)
+		var loss: int = _price_for_key(str(stolen["key"]))
+		var victim: Order = _order_for_key(str(stolen["key"]))
+		if victim != null:
+			_orders.mark_stolen(victim.order_id)
 		_economy.add_stolen_loss(loss)
 		_economy.add_review(false)
 		_set_hint("假单号的人把杯子拿走了 -%d" % loss)
@@ -270,27 +285,37 @@ func _tick_thief(delta: float) -> void:
 	_dismiss_thief()
 
 
-func _give_to_customer(cup_order_id: String, pawn: Control) -> void:
-	var selected: Order = _orders.get_order(cup_order_id)
-	if selected == null:
+func _give_to_customer(cup_token: String, pawn: Control) -> void:
+	if not cup_token.begins_with("cup:"):
 		return
+	var cup := _take_ready_cup(cup_token.trim_prefix("cup:"))
+	if cup.is_empty():
+		return
+	var price: int = _price_for_key(str(cup["key"]))
+	if bool(cup["tainted"]):
+		price = maxi(price - 2, 1)
 	if pawn.is_thief:
-		var loss: int = selected.value()
-		_orders.mark_stolen(selected.order_id)
-		_economy.add_stolen_loss(loss)
+		var victim: Order = _order_for_key(str(cup["key"]))
+		if victim != null:
+			_orders.mark_stolen(victim.order_id)
+		_economy.add_stolen_loss(price)
 		_economy.add_review(false)
-		_set_hint("杯子给错人了，被拿走 -%d" % loss)
+		_set_hint("杯子给错人了，被拿走 -%d" % price)
 		_dismiss_thief()
 		_refresh_pickup()
 		return
-	if cup_order_id == pawn.order_id:
-		var gain: int = selected.value()
-		_orders.mark_taken(selected.order_id)
-		_economy.add_revenue(gain)
+	var guest: Order = _orders.get_order(pawn.order_id)
+	if guest != null and guest.status == "pending" and guest.recipe_key() == str(cup["key"]):
+		_orders.mark_taken(guest.order_id)
+		_economy.add_revenue(price)
 		_economy.add_review(true)
-		_set_hint("交对了 +%d" % gain)
+		var note := "交对了 +%d" % price
+		if bool(cup["tainted"]):
+			note += "，有蟑螂味 -2"
+		_set_hint(note)
 	else:
-		_orders.mark_complaint(selected.order_id)
+		if guest != null and guest.status == "pending":
+			_orders.mark_complaint(guest.order_id)
 		var cost := _fine(20)
 		_economy.add_fine(cost)
 		_economy.add_review(false)
@@ -474,18 +499,80 @@ func _fine(amount: int) -> int:
 
 
 func _try_make(order_id: String) -> void:
-	if _handover_open or _day.phase != "open":
-		return
 	var order: Order = _orders.get_order(order_id)
 	if order == null:
 		return
-	var recipe := "、".join(order.ingredients)
-	if not _orders.start_making(order_id):
-		_set_hint("%s：%s" % [order.order_id, recipe])
+	_set_hint("%s：%s" % [order.display_name, order.describe()])
+
+
+func _tick_pour(delta: float) -> void:
+	if _pouring:
+		_recipe.add_water(delta / 0.8)
+
+
+func _on_cup_hold(down: bool) -> void:
+	if _slipper_held:
 		return
-	_recipe.start_cup(order)
+	_pouring = down
+
+
+func _try_seal() -> void:
+	if not _recipe.has_cup():
+		_set_hint("台上没有杯子")
+		return
+	if _shift != null and _shift.rinse and _cup_dirty:
+		_recipe.discard_cup()
+		_cup_dirty = false
+		var cost := _fine(20)
+		_economy.add_fine(cost)
+		_economy.add_review(false)
+		_set_hint("没涮杯就封，客人投诉 -%d" % cost)
+		return
+	if not _recipe.water_done:
+		_set_hint("按住杯子，把水加满")
+		return
+	var key: String = _recipe.recipe_key()
+	var match: Order = _order_for_key(key)
+	if match == null:
+		var made := "、".join(_recipe.added)
+		_set_hint("没有客人要这杯：%s，摇了%d次" % [made, _recipe.shake_count])
+		return
+	if _ready_cups.size() >= 3:
+		_set_hint("台上已经有三杯，先交出去")
+		return
+	var shot: Dictionary = _recipe.snapshot_and_reset()
+	_cup_serial += 1
+	shot["uid"] = _cup_serial
+	shot["name"] = match.display_name
+	_ready_cups.append(shot)
+	_thief_roll_done = false
 	_cup_dirty = false
-	_set_hint("%s：%s" % [order.order_id, recipe])
+	_refresh_pickup()
+	_refresh_station()
+	_set_hint("做成了%s，拖给任何一位要这杯的客人" % match.display_name)
+
+
+func _order_for_key(key: String) -> Order:
+	for order in _orders.active_orders:
+		if order.status == "pending" and order.recipe_key() == key:
+			return order
+	return null
+
+
+func _price_for_key(key: String) -> int:
+	var order: Order = _order_for_key(key)
+	if order == null:
+		return 12
+	return order.value()
+
+
+func _take_ready_cup(uid_text: String) -> Dictionary:
+	for i in _ready_cups.size():
+		if str(_ready_cups[i]["uid"]) == uid_text:
+			var found: Dictionary = _ready_cups[i]
+			_ready_cups.remove_at(i)
+			return found
+	return {}
 
 
 func _set_hint(text: String) -> void:
@@ -500,27 +587,31 @@ func _refresh_hud() -> void:
 	_rating_label.text = "评分 %.1f" % _economy.rating
 
 
+func _on_cup_updated() -> void:
+	_refresh_station()
+	if not _recipe.has_cup():
+		return
+	var made := "、".join(_recipe.added)
+	if made == "":
+		made = "还没加料"
+	var water_text := "水满了" if _recipe.water_done else "按住杯子加水"
+	_set_hint("%s，%s，摇了%d次" % [made, water_text, _recipe.shake_count])
+
+
 func _refresh_station() -> void:
 	if _cup == null:
 		return
 	if not _recipe.has_cup():
-		_cup.show_layers([], false)
+		_cup.call("show_layers", [], false)
 		_cup.modulate = Color.WHITE
 		return
-	_cup.show_layers(_recipe.added, false)
-	_cup.modulate = Color(0.62, 0.5, 0.38) if _cup_dirty else Color.WHITE
-	var next: String = _recipe.next_ingredient()
-	var needed: Array = _recipe.needed
-	var added: Array = _recipe.added
-	var left: PackedStringArray = PackedStringArray()
-	for i in range(added.size(), needed.size()):
-		left.append(str(needed[i]))
-	if next != "":
-		_set_hint("还要：%s" % "、".join(left))
-	elif _recipe.shake_required and _recipe.shake_count < 3:
-		_set_hint("摇匀 %d / 3" % _recipe.shake_count)
-	else:
-		_set_hint("可以封杯了")
+	_cup.call("show_state", _recipe.added, _recipe.water, false)
+	var tint := Color.WHITE
+	if _cup_dirty:
+		tint = Color(0.62, 0.5, 0.38)
+	elif _recipe.tainted:
+		tint = Color(0.86, 0.8, 0.62)
+	_cup.modulate = tint
 
 
 func _rebuild_orders() -> void:
@@ -556,10 +647,11 @@ func _refresh_pickup() -> void:
 		return
 	for child in _pickup_box.get_children():
 		child.queue_free()
-	for order in _orders.ready_orders():
-		var cup := preload("res://scripts/view/drag_cup.gd").new()
-		cup.setup(order.order_id, order.ingredients)
-		_pickup_box.add_child(cup)
+	for cup in _ready_cups:
+		var view := preload("res://scripts/view/drag_cup.gd").new()
+		view.setup("cup:%s" % str(cup["uid"]), cup["items"])
+		view.set_caption(str(cup["name"]))
+		_pickup_box.add_child(view)
 
 
 func _tick_roaches(delta: float) -> void:
@@ -576,7 +668,7 @@ func _tick_roaches(delta: float) -> void:
 		cup_at = _cup.get_global_rect().get_center()
 	var soil_changed := false
 	for child in _roach_layer.get_children():
-		if spots.size() > 0 and child._goal_time > 3.2:
+		if spots.size() > 0 and child._goal_time > (5.5 if _day.day_index < 3 else 3.2):
 			child.set_goal(spots[randi() % spots.size()])
 		var on_cup: bool = cup_ready and child.global_position.distance_to(cup_at) <= 78.0
 		if on_cup:
@@ -636,8 +728,13 @@ func _roach_spots() -> Array[Vector2]:
 func _spawn_roach() -> void:
 	var roach := preload("res://scripts/view/shop_roach.gd").new()
 	roach.speed = 78.0 * (1.0 + 0.04 * float(mini(_day.day_index, 15)))
+	if _day.day_index < 3:
+		roach.speed *= 0.45
 	roach.bounds = Rect2(Vector2.ZERO, _roach_layer.size)
-	roach.position = Vector2(randf_range(40.0, 640.0), randf_range(180.0, 520.0))
+	var spawn_y := randf_range(180.0, 520.0)
+	if _day.day_index < 3:
+		spawn_y = randf_range(24.0, 120.0)
+	roach.position = Vector2(randf_range(40.0, 640.0), spawn_y)
 	_roach_layer.add_child(roach)
 	var spots := _roach_spots()
 	if spots.size() > 0:
@@ -683,12 +780,20 @@ func _on_bin_pressed(item: String) -> void:
 	if _wash_left > 0.0 or _restock_left > 0.0:
 		_set_hint("手头的活还没做完")
 		return
-	if int(_dirt.get(item, 0)) >= 3:
+	if int(_dirt.get(item, 0)) > 0 and _day.day_index < 3:
+		_dirt[item] = 0
+		_soil[item] = 0.0
+		_refresh_bins()
+		_set_hint("擦掉了%s上的口水" % item)
+		return
+	if _day.day_index >= 3 and int(_dirt.get(item, 0)) >= 3:
 		_begin_wash(item)
 		return
 	if _shift != null and _shift.stock >= 0 and int(_stock.get(item, 0)) <= 0:
 		_begin_restock(item)
 		return
+	if int(_dirt.get(item, 0)) > 0:
+		_recipe.mark_tainted()
 	_recipe.add_ingredient(item)
 
 
@@ -707,9 +812,6 @@ func _start_wash_dirtiest() -> void:
 
 
 func _begin_wash(item: String) -> void:
-	if _shift == null or _shift.soil_seconds <= 0.0:
-		_set_hint("这天还不用洗碗")
-		return
 	if int(_dirt.get(item, 0)) <= 0:
 		_set_hint("这只碗是干净的")
 		return
@@ -742,20 +844,6 @@ func _start_rinse() -> void:
 		return
 	_rinse_left = _shift.rinse_time
 	_set_hint("正在涮杯")
-
-
-func _try_seal() -> void:
-	if _shift != null and _shift.rinse and _cup_dirty and _recipe.has_cup():
-		var order_id: String = _recipe.current_order_id
-		_recipe.discard_cup()
-		_cup_dirty = false
-		_orders.mark_complaint(order_id)
-		var cost := _fine(20)
-		_economy.add_fine(cost)
-		_economy.add_review(false)
-		_set_hint("没涮杯就封，客人投诉 -%d" % cost)
-		return
-	_recipe.seal_cup()
 
 
 func _tick_chores(delta: float) -> void:
@@ -802,10 +890,14 @@ func _input(event: InputEvent) -> void:
 	if not _is_click(event):
 		return
 	var at := get_global_mouse_position()
-	if get_viewport().gui_is_dragging() or _over_pickup(at):
+	if get_viewport().gui_is_dragging() or _over_pickup(at) or _over_tool(at):
+		return
+	if not _slipper_held:
 		return
 	if _thief_under(at) != null:
+		_slipper_held = false
 		_slipper.try_slam(at)
+		_show_resting_slipper()
 		get_viewport().set_input_as_handled()
 		return
 	if _counter == null or not _counter.get_global_rect().has_point(at):
@@ -822,9 +914,72 @@ func _input(event: InputEvent) -> void:
 			break
 	if not aiming_roach and on_bin:
 		return
+	_slipper_held = false
 	_slipper.try_slam(at)
+	_show_resting_slipper()
 	if aiming_roach or not on_bin:
 		get_viewport().set_input_as_handled()
+
+
+func _toggle_slipper() -> void:
+	_slipper_held = not _slipper_held
+	if _slipper != null:
+		_slipper.visible = _slipper_held
+		if _slipper_held:
+			_slipper.global_position = get_global_mouse_position()
+	_show_resting_slipper()
+	if _slipper_held:
+		_set_hint("拖鞋拿起来了，点蟑螂或假单号的人")
+	else:
+		_set_hint("拖鞋放回原位了")
+
+
+func _refresh_tool_buttons() -> void:
+	if _sink != null:
+		_sink.visible = _shift != null and _day.day_index >= 3
+	if _rinse_station != null:
+		_rinse_station.visible = _shift != null and _shift.rinse
+
+
+func _show_resting_slipper() -> void:
+	if _slipper_rest != null:
+		_slipper_rest.modulate.a = 0.35 if _slipper_held else 1.0
+	if _cup != null:
+		_cup.mouse_filter = Control.MOUSE_FILTER_IGNORE if _slipper_held else Control.MOUSE_FILTER_STOP
+
+
+func _dump_station() -> void:
+	if not _recipe.has_cup():
+		return
+	var empty: bool = _recipe.added.is_empty() and _recipe.water <= 0.0 and _recipe.shake_count == 0
+	if empty:
+		_set_hint("这杯还是空的")
+		return
+	_recipe.discard_cup()
+	_cup_dirty = false
+	_pouring = false
+	_set_hint("这杯倒进垃圾桶了")
+
+
+func _trash_ready_cup(token: String) -> void:
+	if _take_ready_cup(token.trim_prefix("cup:")).is_empty():
+		return
+	_refresh_pickup()
+	_set_hint("这杯扔了")
+
+
+func _over_tool(at: Vector2) -> bool:
+	if _slipper_rest != null and _slipper_rest.get_global_rect().has_point(at):
+		return true
+	if _trash != null and _trash.get_global_rect().has_point(at):
+		return true
+	if _sink != null and _sink.visible and _sink.get_global_rect().has_point(at):
+		return true
+	return _rinse_station != null and _rinse_station.visible and _rinse_station.get_global_rect().has_point(at)
+
+
+func _over_cup(at: Vector2) -> bool:
+	return _cup != null and _cup.get_global_rect().has_point(at)
 
 
 func _over_pickup(at: Vector2) -> bool:
@@ -940,8 +1095,37 @@ func _build_ui() -> void:
 	_cup = preload("res://scripts/view/cup_view.gd").new()
 	_cup.position = Vector2(284, 330)
 	_cup.size = Vector2(150, 170)
-	_cup.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_cup.mouse_filter = Control.MOUSE_FILTER_STOP
+	_cup.connect("hold_changed", _on_cup_hold)
 	root.add_child(_cup)
+	_slipper_rest = preload("res://scripts/view/slipper_rest.gd").new()
+	_slipper_rest.position = Vector2(28, 348)
+	_slipper_rest.size = Vector2(130, 150)
+	_slipper_rest.z_index = 6
+	_slipper_rest.connect("picked", _toggle_slipper)
+	root.add_child(_slipper_rest)
+	_trash = preload("res://scripts/view/trash_bin.gd").new()
+	_trash.position = Vector2(36, 520)
+	_trash.size = Vector2(120, 160)
+	_trash.connect("dumped", _dump_station)
+	_trash.connect("cup_trashed", _trash_ready_cup)
+	root.add_child(_trash)
+	_sink = preload("res://scripts/view/wash_station.gd").new()
+	_sink.set("kind", "sink")
+	_sink.position = Vector2(180, 520)
+	_sink.size = Vector2(120, 150)
+	_sink.z_index = 6
+	_sink.visible = false
+	_sink.connect("used", _start_wash_dirtiest)
+	root.add_child(_sink)
+	_rinse_station = preload("res://scripts/view/wash_station.gd").new()
+	_rinse_station.set("kind", "rinse")
+	_rinse_station.position = Vector2(320, 520)
+	_rinse_station.size = Vector2(120, 150)
+	_rinse_station.z_index = 6
+	_rinse_station.visible = false
+	_rinse_station.connect("used", _start_rinse)
+	root.add_child(_rinse_station)
 
 	_roach_layer = Control.new()
 	_roach_layer.position = Vector2(16, 304)
@@ -992,20 +1176,6 @@ func _build_ui() -> void:
 	seal.pressed.connect(_try_seal)
 	actions.add_child(shake)
 	actions.add_child(seal)
-	var wash := Button.new()
-	wash.text = "洗涤"
-	wash.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	wash.custom_minimum_size = Vector2(0, 64)
-	wash.add_theme_font_size_override("font_size", 24)
-	wash.pressed.connect(_start_wash_dirtiest)
-	var rinse := Button.new()
-	rinse.text = "涮杯"
-	rinse.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	rinse.custom_minimum_size = Vector2(0, 64)
-	rinse.add_theme_font_size_override("font_size", 24)
-	rinse.pressed.connect(_start_rinse)
-	actions.add_child(wash)
-	actions.add_child(rinse)
 
 	_slipper = preload("res://scenes/slipper.tscn").instantiate()
 	_slipper.z_index = 40
